@@ -1,0 +1,9 @@
+{
+  "UniformDataTypeDeclarations": [{
+    "TypeId": "com.personal.qbitharmony.torrent",
+    "BelongingToTypes": ["general.file"],
+    "FilenameExtensions": [".torrent"],
+    "MIMETypes": ["application/x-bittorrent"],
+    "Description": "BitTorrent metadata"
+  }]
+}
