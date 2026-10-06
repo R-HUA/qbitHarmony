@@ -58,6 +58,9 @@ export async function openNotificationSettings(context: common.UIAbilityContext)
   await notificationManager.openNotificationSettingsWithResult(context);
 }
 async function publishSummary(profile: ServerProfile, events: NoticeEvent[]): Promise<void> {
+  const title = events.length === 1 ? '下载完成' : `${events.length} 项下载完成`;
+  const names = events.map((event: NoticeEvent): string => event.name).join('；');
+  const text = names.length > 120 ? names.slice(0, 119) + '…' : names;
   const agent = await wantAgent.getWantAgent({ wants: [{ bundleName: 'com.personal.qbitharmony', abilityName: 'EntryAbility',
     action: 'com.personal.qbitharmony.NOTIFICATION.' + profile.id,
     parameters: { notificationServerId: profile.id } }], requestCode: 2710,
@@ -65,7 +68,7 @@ async function publishSummary(profile: ServerProfile, events: NoticeEvent[]): Pr
   await notificationManager.publish({ id: 2710, label: profile.id, isAlertOnce: true,
     autoDeletedTime: Date.now() + 86400000, wantAgent: agent,
     content: { notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
-      normal: { title: `${events.length} 项任务已完成`, text: events.length === 1 ? events[0].name.slice(0, 120) : `${profile.name}：本次检查有 ${events.length} 项任务完成`, additionalText: profile.name } } });
+      normal: { title: title, text: text, additionalText: profile.name } } });
 }
 export async function observeCompletions(context: common.Context, profile: ServerProfile, torrents: Torrent[], checkedAt: number): Promise<void> {
   if (!await notificationManager.isNotificationEnabled()) { return; }
