@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-import { ColorMetrics, RectShape, SymbolGlyphModifier, LengthMetrics, ToolBar, ToolBarOptions, ToolBarModifier, DividerModifier, ItemState } from '@kit.ArkUI';
-import { TitleBarStyleOptions, HideMode, HdsTitleBarContentStyle, DividerShowType, ScrollEffectType, hdsMaterial, HdsNavigation, HdsNavDestination, HdsNavigationTitleMode, HdsTabs, HdsTabsController, HdsAnimationMode, HdsNavigationMenuItemOptions, HdsListItemCard, SuffixArrow } from '@kit.UIDesignKit';
+import { FrameCallback, ColorMetrics, RectShape, SymbolGlyphModifier, TextModifier, LengthMetrics, ToolBar, ToolBarOptions, ToolBarModifier, DividerModifier, ItemState, ChipGroup, ChipSize, uiMaterial } from '@kit.ArkUI';
+import { TitleBarStyleOptions, HideMode, HdsTitleBarContentStyle, DividerShowType, ScrollEffectType, hdsMaterial, HdsNavigation, HdsNavDestination, HdsNavigationTitleMode, HdsNavDestinationTitleMode, HdsTabs, HdsTabsController, HdsAnimationMode, HdsNavigationMenuItemOptions, HdsListItemCard, TextOptions, SuffixArrow, SuffixTextAndArrow, SuffixCustomBuilder } from '@kit.UIDesignKit';
 import { TorrentRows, TorrentRowData } from '../services/TorrentRows';
 import { TorrentCard } from './TorrentCard';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
@@ -16,13 +16,49 @@ import { NativeTransport } from '../services/NativeTransport';
 import { ProfileStore } from '../services/ProfileStore';
 import { notificationStatus, notificationsEnabled, setNotifications, openNotificationSettings, observeCompletions } from '../services/LocalNotifications';
 
-interface DetailPair { label: string; value: string; }
+interface DetailPair { label: string; value: string; last?: boolean; }
 interface SettingsEntry { title: string; subtitle: string; route: string; }
-interface ActionEntry { title: string; action: () => void; }
+interface ActionEntry { title: string; action: () => void; opensPage?: boolean; destructive?: boolean; }
+interface SwitchEntry { title: string; checked: boolean; change: (checked: boolean) => void; }
+interface ChoiceEntry { title: string; options: string[]; selected: number; value: string; change: (index: number) => void; }
+interface InputEntry { title: string; subtitle?: string; value: string; placeholder?: string; type?: InputType; id?: string; maxLength?: number; change: (value: string) => void; }
+
+class DetailLayoutReady extends FrameCallback {
+  private action: () => void;
+  constructor(action: () => void) { super(); this.action = action; }
+  onIdle(_timeLeft: number): void { this.action(); }
+}
 
 @Observed
 class TaskSummaryMotion {
   progress: number = 0;
+}
+
+@Observed
+class DetailTabSelection {
+  index: number = 0;
+}
+
+@Component
+struct DetailTabStrip {
+  @ObjectLink selection: DetailTabSelection;
+  change: (index: number) => void = () => {};
+  measure: () => void = () => {};
+  build() {
+    ChipGroup({ items: [{ label: { text: '概览' } }, { label: { text: '文件' } },
+      { label: { text: 'Tracker' } }, { label: { text: '用户' } }],
+      itemStyle: { size: ChipSize.SMALL, fontColor: $r('sys.color.font_secondary'),
+        selectedFontColor: $r('sys.color.brand'), selectedBackgroundColor: $r('sys.color.comp_background_primary') },
+      selectedIndexes: [this.selection.index], multiple: false,
+      chipGroupSpace: { itemSpace: 8, startSpace: 16, endSpace: 16 },
+      chipGroupPadding: { top: 6, bottom: 6 },
+      backgroundSystemMaterial: new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.ULTRA_THIN,
+        materialColor: $r('sys.color.comp_background_tertiary') }),
+      selectedBackgroundSystemMaterial: new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.ULTRA_THIN,
+        materialColor: $r('sys.color.comp_background_primary') }),
+      onChange: (indexes: number[]) => { if (indexes.length && indexes[0] !== this.selection.index) { this.change(indexes[0]); } }
+    }).id('detailTabStrip').width('100%').onAreaChange(() => { this.measure(); })
+  }
 }
 
 @Component
@@ -66,7 +102,12 @@ export struct Home {
   @StorageLink('statusBarHeightPx') private statusBarHeightPx: number = 0;
   private settingsScroller: Scroller = new Scroller();
   private pageScrollers: Map<string, Scroller> = new Map();
-  @State detailTab: number = 0;
+  @State detailTabSelection: DetailTabSelection = new DetailTabSelection();
+  @State detailContentIndex: number = 0;
+  @State detailHeaderBottom: number = 0;
+  private detailScrollOffsets: number[] = [0, 0, 0, 0];
+  private detailTabsController: TabsController = new TabsController();
+  @State choiceRowWidth: number = 0;
   @State bulkToolItems: ToolBarOptions = new ToolBarOptions();
   private taskScroller: Scroller = new Scroller();
   private pendingConnectId: string = '';
@@ -159,7 +200,7 @@ export struct Home {
     if (!scroller) { scroller = new Scroller(); this.pageScrollers.set(name, scroller); }
     return scroller;
   }
-  private navigationStyle(taskRoot: boolean = false): TitleBarStyleOptions {
+  private navigationStyle(taskRoot: boolean = false, detailTitle: boolean = false): TitleBarStyleOptions {
     const backdrop = ColorMetrics.resourceColor($r('sys.color.comp_background_gray'));
     const taskBackground = ColorMetrics.rgba(backdrop.red, backdrop.green, backdrop.blue,
       backdrop.alpha / 255 * this.taskBlurProgress).color;
@@ -171,10 +212,11 @@ export struct Home {
     return {
       systemMaterialEffect: { materialType: hdsMaterial.MaterialType.ADAPTIVE, materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE },
       scrollEffectOpts: { enableScrollEffect: !taskRoot, scrollEffectType: ScrollEffectType.GRADIENT_BLUR,
-        enableRefreshOffsetChange: false, blurEffectiveStartOffset: LengthMetrics.vp(0), blurEffectiveEndOffset: LengthMetrics.vp(8) },
+        enableRefreshOffsetChange: false, blurEffectiveStartOffset: LengthMetrics.vp(0), blurEffectiveEndOffset: LengthMetrics.vp(detailTitle ? 24 : 8) },
       originalStyle: { backgroundStyle: { backgroundColor: taskRoot ? taskBackground : Color.Transparent,
         blurRadius: taskRoot ? 12 * this.taskBlurProgress : 0, maskExtraHeight: 32 }, contentStyle: content },
-      scrollEffectStyle: { backgroundStyle: { backgroundColor: $r('sys.color.comp_background_gray'), blurRadius: 12 }, contentStyle: content }
+      scrollEffectStyle: { backgroundStyle: { backgroundColor: taskRoot ? $r('sys.color.comp_background_gray') : Color.Transparent,
+        blurRadius: 12, maskExtraHeight: 32 }, contentStyle: content }
     };
   }
   private message(error: Error): string { return error.message || '操作失败，请稍后重试。'; }
@@ -371,6 +413,14 @@ export struct Home {
     finally { this.busy = false; }
   }
   private async openDetails(torrent: Torrent): Promise<void> {
+    if (this.selected?.hash !== torrent.hash) {
+      this.detailTabSelection.index = 0;
+      this.detailContentIndex = 0;
+      this.detailHeaderBottom = 0;
+      this.detailScrollOffsets = [0, 0, 0, 0];
+      this.detailTabsController = new TabsController();
+      for (let index = 0; index < 4; index++) { this.pageScrollers.delete('detail-' + index); }
+    }
     this.expandedFiles = []; this.selectedFiles = []; this.selectingFiles = false;
     this.selected = torrent; this.files = []; this.trackers = [];
     this.paths.pushPathByName('detail', null); await this.loadLiveDetails(torrent.hash); await this.loadDetails(torrent.hash);
@@ -488,10 +538,6 @@ export struct Home {
   private selectionModeChanged(): void {
     if (this.selecting) { this.tabsController.applyHideAnimation(HdsAnimationMode.CLICK_ANIMATION); }
     else { this.tabsController.applyShowAnimation(HdsAnimationMode.CLICK_ANIMATION); }
-  }
-  private categoryOptions(): SelectOption[] {
-    const options: SelectOption[] = [{ value: '未分类' }];
-    return options.concat(this.categories.map((c: Category): SelectOption => { return { value: c.name }; }));
   }
   private toggleSelection(hash: string): void {
     this.selection = this.selection.includes(hash) ? this.selection.filter((id: string) => id !== hash) : this.selection.concat([hash]);
@@ -639,54 +685,70 @@ export struct Home {
 
   @Builder
   private taskRulesForm() {
-    Column({ space: 16 }) {
+    Column({ space: 12 }) {
       this.notice()
-      this.label('下载限速（KiB/s，0 为不限速）')
-      Row({ space: 12 }) {
-        TextInput({ text: this.downloadLimit }).type(InputType.Number).layoutWeight(1).onChange((v: string) => { this.downloadLimit = v; })
-        Button('保存').backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).onClick(() => { this.saveTaskLimit('Download', this.downloadLimit); })
-      }.width('100%')
-      this.label('上传限速（KiB/s，0 为不限速）')
-      Row({ space: 12 }) {
-        TextInput({ text: this.uploadLimit }).type(InputType.Number).layoutWeight(1).onChange((v: string) => { this.uploadLimit = v; })
-        Button('保存').backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).onClick(() => { this.saveTaskLimit('Upload', this.uploadLimit); })
-      }.width('100%')
-      this.label('分享率上限')
-      Select([{ value: '使用全局规则' }, { value: '无限制' }, { value: '自定义' }])
-        .selected(this.ruleRatio === '-2' ? 0 : this.ruleRatio === '-1' ? 1 : 2)
-        .value(this.ruleRatio === '-2' ? '使用全局规则' : this.ruleRatio === '-1' ? '无限制' : '自定义')
-        .onSelect((index: number) => { this.ruleRatio = index === 0 ? '-2' : index === 1 ? '-1' : '1'; }).width('100%')
-      if (Number(this.ruleRatio) >= 0) { TextInput({ text: this.ruleRatio }).type(InputType.NUMBER_DECIMAL).onChange((v: string) => { this.ruleRatio = v; }) }
-      this.label('做种时间上限（分钟）')
-      Select([{ value: '使用全局规则' }, { value: '无限制' }, { value: '自定义' }])
-        .selected(this.ruleMinutes === '-2' ? 0 : this.ruleMinutes === '-1' ? 1 : 2)
-        .value(this.ruleMinutes === '-2' ? '使用全局规则' : this.ruleMinutes === '-1' ? '无限制' : '自定义')
-        .onSelect((index: number) => { this.ruleMinutes = index === 0 ? '-2' : index === 1 ? '-1' : '1440'; }).width('100%')
-      if (Number(this.ruleMinutes) >= 0) { TextInput({ text: this.ruleMinutes }).type(InputType.Number).onChange((v: string) => { this.ruleMinutes = v; }) }
-      this.label('无活动做种上限（分钟）')
-      Select([{ value: '使用全局规则' }, { value: '无限制' }, { value: '自定义' }])
-        .selected(this.ruleInactive === '-2' ? 0 : this.ruleInactive === '-1' ? 1 : 2)
-        .value(this.ruleInactive === '-2' ? '使用全局规则' : this.ruleInactive === '-1' ? '无限制' : '自定义')
-        .onSelect((index: number) => { this.ruleInactive = index === 0 ? '-2' : index === 1 ? '-1' : '60'; }).width('100%')
-      if (Number(this.ruleInactive) >= 0) { TextInput({ text: this.ruleInactive }).type(InputType.Number).onChange((v: string) => { this.ruleInactive = v; }) }
+      Column() {
+        this.inputRow({ title: '下载限速', subtitle: 'KiB/s，0 为不限速', value: this.downloadLimit, type: InputType.Number, change: (v: string) => { this.downloadLimit = v; } })
+        this.cardDivider()
+        this.actionRow({ title: '保存下载限速', action: () => { this.saveTaskLimit('Download', this.downloadLimit); } })
+      }.groupedCard()
+      Column() {
+        this.inputRow({ title: '上传限速', subtitle: 'KiB/s，0 为不限速', value: this.uploadLimit, type: InputType.Number, change: (v: string) => { this.uploadLimit = v; } })
+        this.cardDivider()
+        this.actionRow({ title: '保存上传限速', action: () => { this.saveTaskLimit('Upload', this.uploadLimit); } })
+      }.groupedCard()
+      this.sectionTitle('做种规则')
+      Column() {
+        this.choiceRow({ title: '分享率上限', options: ['使用全局规则', '无限制', '自定义'],
+          selected: this.ruleRatio === '-2' ? 0 : this.ruleRatio === '-1' ? 1 : 2,
+          value: this.ruleRatio === '-2' ? '使用全局规则' : this.ruleRatio === '-1' ? '无限制' : '自定义',
+          change: (i: number) => { this.ruleRatio = i === 0 ? '-2' : i === 1 ? '-1' : '1'; } })
+        // 输入中的小数可能暂时不是有效数值，不能因此销毁自定义输入框。
+        if (this.ruleRatio !== '-2' && this.ruleRatio !== '-1') {
+          this.inputRow({ title: '分享率', value: this.ruleRatio, type: InputType.NUMBER_DECIMAL, change: (v: string) => { this.ruleRatio = v; } })
+        }
+        this.cardDivider()
+        this.choiceRow({ title: '做种时间上限', options: ['使用全局规则', '无限制', '自定义'],
+          selected: this.ruleMinutes === '-2' ? 0 : this.ruleMinutes === '-1' ? 1 : 2,
+          value: this.ruleMinutes === '-2' ? '使用全局规则' : this.ruleMinutes === '-1' ? '无限制' : '自定义',
+          change: (i: number) => { this.ruleMinutes = i === 0 ? '-2' : i === 1 ? '-1' : '1440'; } })
+        if (this.ruleMinutes !== '-2' && this.ruleMinutes !== '-1') {
+          this.inputRow({ title: '做种时间', subtitle: '分钟', value: this.ruleMinutes, type: InputType.Number, change: (v: string) => { this.ruleMinutes = v; } })
+        }
+        this.cardDivider()
+        this.choiceRow({ title: '无活动做种上限', options: ['使用全局规则', '无限制', '自定义'],
+          selected: this.ruleInactive === '-2' ? 0 : this.ruleInactive === '-1' ? 1 : 2,
+          value: this.ruleInactive === '-2' ? '使用全局规则' : this.ruleInactive === '-1' ? '无限制' : '自定义',
+          change: (i: number) => { this.ruleInactive = i === 0 ? '-2' : i === 1 ? '-1' : '60'; } })
+        if (this.ruleInactive !== '-2' && this.ruleInactive !== '-1') {
+          this.inputRow({ title: '无活动做种时间', subtitle: '分钟', value: this.ruleInactive, type: InputType.Number, change: (v: string) => { this.ruleInactive = v; } })
+        }
+      }.groupedCard()
       Button('保存做种规则').width('100%').onClick(() => { this.saveTaskRules(); })
-    }.padding(20).width('100%').enabled(!this.busy)
+    }.padding({ left: 16, right: 16, top: 12, bottom: 24 }).width('100%').enabled(!this.busy)
   }
 
   @Builder
   private filesPage() {
-    Column({ space: 8 }) {
+    List({ scroller: this.pageScroller('detail-1') }) {
+      this.detailListInset()
+      if (this.error) { ListItem() { this.notice() }.padding({ left: 16, right: 16 }) }
+      ListItem() {
       Row({ space: 8 }) {
         Text(this.selectingFiles ? `已选 ${this.selectedFiles.length} 个文件` : `${this.files.length} 个文件`).fontSize(12).fontColor($r('sys.color.font_secondary')).layoutWeight(1)
         if (this.selectingFiles) {
-          Button('全选').backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).onClick(() => { this.selectedFiles = this.files.map((f: TorrentFile): number => f.index); })
-          Button('优先级').enabled(this.selectedFiles.length > 0 && !this.busy).backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).onClick(() => { this.chooseFilePriority(this.selectedFiles.slice()); })
+          Button('全选').fontSize(14).fontWeight(FontWeight.Regular).padding({ left: 8, right: 8 }).backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).onClick(() => { this.selectedFiles = this.files.map((f: TorrentFile): number => f.index); })
+          Button('优先级').enabled(this.selectedFiles.length > 0 && !this.busy).fontSize(14).fontWeight(FontWeight.Regular).padding({ left: 8, right: 8 }).backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).onClick(() => { this.chooseFilePriority(this.selectedFiles.slice()); })
         } else {
-          Button('刷新').backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).onClick(() => { if (this.selected) { this.loadDetails(this.selected.hash); } })
+          Button('刷新').fontSize(14).fontWeight(FontWeight.Regular).padding({ left: 8, right: 8 }).backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).onClick(() => { if (this.selected) { this.loadDetails(this.selected.hash); } })
         }
-        Button(this.selectingFiles ? '完成' : '选择').backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).onClick(() => { this.selectingFiles = !this.selectingFiles; this.selectedFiles = []; })
-      }.width('100%').height(44)
-      List({ space: 2, scroller: this.pageScroller('detail-1') }) {
+        Button(this.selectingFiles ? '完成' : '选择').fontSize(14).fontWeight(FontWeight.Regular).padding({ left: 8, right: 8 }).backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).onClick(() => { this.selectingFiles = !this.selectingFiles; this.selectedFiles = []; })
+      }.width('100%').height(40).padding({ left: 32, right: 32 })
+      }
+        if (this.files.length === 0) {
+          ListItem() { this.empty(this.detailLoading ? '正在加载文件…' : '暂无文件', '') }
+        }
+        ListItemGroup() {
         ForEach(this.fileNodes(), (node: FileNode) => {
           ListItem() {
             Row({ space: 8 }) {
@@ -701,24 +763,27 @@ export struct Home {
                 SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).rotate({ angle: this.expandedFiles.includes(node.path) ? 90 : 0 }).fontColor([$r('sys.color.icon_secondary')])
               }
               Column({ space: 5 }) {
-                Text(node.name).fontSize(15).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-                Text(`${bytes(node.size)} · ${percent(node.progress)}%` + (node.directory ? ` · ${node.ids.length} 个文件` : '')).fontSize(12).fontColor($r('sys.color.font_secondary')).width('100%')
+                Text(node.name).fontSize(16).fontColor($r('sys.color.font_primary')).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+                Text(`${bytes(node.size)} · ${percent(node.progress)}%` + (node.directory ? ` · ${node.ids.length} 个文件` : '')).fontSize(14).fontColor($r('sys.color.font_secondary')).width('100%')
                 if (this.selectingFiles && node.directory && node.ids.some((id: number): boolean => this.selectedFiles.includes(id))) {
                   Text(`已选 ${node.ids.filter((id: number): boolean => this.selectedFiles.includes(id)).length} / ${node.ids.length}`).fontSize(12).fontColor($r('sys.color.font_secondary')).width('100%')
                 }
               }.layoutWeight(1)
               if (!this.selectingFiles) {
                 Button(node.priority === -1 ? '混合' : node.priority === 0 ? '不下载' : node.priority === 6 ? '高' : node.priority === 7 ? '最高' : '普通')
-                  .fontSize(12).backgroundColor(Color.Transparent).fontColor($r('sys.color.font_secondary')).enabled(!this.busy)
+                  .fontSize(12).fontSize(14).fontWeight(FontWeight.Regular).padding({ left: 8, right: 8 }).backgroundColor(Color.Transparent).fontColor($r('sys.color.font_secondary')).enabled(!this.busy)
                   .onClick(() => { this.chooseFilePriority(node.ids); })
               }
-            }.padding({ left: 12 + Math.min(node.depth, 5) * 12, right: 8, top: 12, bottom: 12 }).width('100%')
-              .backgroundColor($r('sys.color.comp_background_primary')).borderRadius(12)
+            }.padding({ left: 16 + Math.min(node.depth, 5) * 12, right: 16, top: 12, bottom: 12 }).width('100%')
               .onClick(() => { if (node.directory) { this.toggleFolder(node); } else if (this.selectingFiles) { this.selectedFiles = toggleFileSelection(this.selectedFiles, node.ids); } else { this.chooseFilePriority(node.ids); } })
           }
         }, (node: FileNode): string => JSON.stringify(node))
-      }.layoutWeight(1).width('100%').contentEndOffset(28).expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
-    }.width('100%').height('100%').expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+        }.groupedCard().width('calc(100% - 32vp)').margin({ left: 16, right: 16 })
+          .divider({ strokeWidth: 0.5, color: $r('sys.color.comp_divider'), startMargin: 16, endMargin: 16 })
+    }.height('100%').width('100%').contentEndOffset(24).clipContent(ContentClipMode.SAFE_AREA)
+      .scrollBarMargin({ start: LengthMetrics.vp(this.detailContentInset()), end: LengthMetrics.vp(24) })
+      .onDidScroll(() => { this.updateDetailHeaderBounds(); }).onScrollStop(() => { this.updateDetailHeaderBounds(); })
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
   }
 
   @Builder
@@ -736,9 +801,117 @@ export struct Home {
   @Builder
   private pair($$: DetailPair) {
     Row({ space: 12 }) {
-      Text($$.label).fontSize(14).fontColor($r('sys.color.font_secondary')).width(90)
-      Text($$.value).fontSize(15).fontColor($r('sys.color.font_primary')).layoutWeight(1).textAlign(TextAlign.End).copyOption(CopyOptions.LocalDevice)
-    }.width('100%').padding({ top: 10, bottom: 10 })
+      Text($$.label).fontSize(16).fontColor($r('sys.color.font_primary')).width('38%')
+      Text($$.value).fontSize(14).fontColor($r('sys.color.font_secondary')).layoutWeight(1).textAlign(TextAlign.End).copyOption(CopyOptions.LocalDevice)
+    }.width('100%').constraintSize({ minHeight: 48 }).padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    if (!$$.last) { this.cardDivider() }
+  }
+  @Styles
+  private groupedCard() {
+    .width('100%').backgroundColor($r('sys.color.comp_background_primary')).borderRadius(20).clip(true)
+  }
+  @Styles
+  private secondaryScroll() {
+    .width('100%').height('100%').align(Alignment.TopStart).clip(false)
+  }
+  @Builder
+  private cardDivider() {
+    Divider().strokeWidth(0.5).color($r('sys.color.comp_divider')).margin({ left: 16, right: 16 })
+  }
+  @Builder
+  private sectionTitle(title: string) {
+    Text(title).fontSize(14).fontColor($r('sys.color.font_secondary')).width('100%')
+      .padding({ left: 16, right: 16, top: 12, bottom: 8 })
+  }
+  private listPrimaryText(title: string, destructive: boolean = false): TextOptions {
+    // 原生文本槽位保留行尾布局空间，只补齐文字的内边距。
+    return { text: title, modifier: new TextModifier().fontSize(16)
+      .fontColor(destructive ? $r('sys.color.warning') : $r('sys.color.font_primary')).padding({ left: 8 }) };
+  }
+  @Builder
+  private switchRow($$: SwitchEntry) {
+    HdsListItemCard({ cardPrefixMargin: 0, cardSuffixMargin: 0, cardBorderRadius: 0,
+      textItem: { primaryText: this.listPrimaryText($$.title) },
+      suffixItem: new SuffixCustomBuilder(() => { this.switchControl($$); }), enable: !this.busy })
+  }
+  @Builder
+  private switchControl($$: SwitchEntry) {
+    Row() {
+    Toggle({ type: ToggleType.Switch, isOn: $$.checked }).enabled(!this.busy)
+      .systemMaterial(new uiMaterial.ImmersiveMaterial())
+      .onChange((checked: boolean) => { if (checked !== $$.checked) { $$.change(checked); } })
+    }.padding({ right: 16 })
+  }
+  @Builder
+  private choiceRow($$: ChoiceEntry) {
+    HdsListItemCard({ cardPrefixMargin: 0, cardSuffixMargin: 0, cardBorderRadius: 0,
+      textItem: { primaryText: this.listPrimaryText($$.title) },
+      suffixItem: new SuffixCustomBuilder(() => { this.choiceControl($$); }), enable: !this.busy })
+      .onAreaChange((_previous: Area, current: Area) => {
+        const width = Number(current.width);
+        if (width > 0 && Math.abs(width - this.choiceRowWidth) > 0.5) { this.choiceRowWidth = width; }
+      })
+  }
+  @Builder
+  private choiceControl($$: ChoiceEntry) {
+    Row() {
+    Select($$.options.map((value: string): SelectOption => { return { value: value }; }))
+      .selected($$.selected).value($$.value).font({ size: 14, weight: FontWeight.Regular }).fontColor($r('sys.color.font_secondary'))
+      .arrowModifier(new SymbolGlyphModifier().fontSize(12).fontColor([$r('sys.color.icon_tertiary')]))
+      .showDefaultSelectedIcon(true)
+      .optionFont({ size: 16, weight: FontWeight.Regular }).optionFontColor($r('sys.color.font_primary'))
+      .selectedOptionFont({ size: 16, weight: FontWeight.Regular }).selectedOptionFontColor($r('sys.color.font_primary'))
+      .divider({ strokeWidth: 0.5, color: $r('sys.color.comp_divider'), startMargin: 16, endMargin: 16 })
+      .menuAlign(MenuAlignType.END)
+      .controlSize(ControlSize.SMALL).enabled(!this.busy)
+      .constraintSize({ maxWidth: this.choiceRowWidth > 0 ? Math.max(64, (this.choiceRowWidth - 32) / 2) : 160 })
+      // 行内按钮保持透明，独立的菜单继续使用应用级 ENABLE 的系统材质。
+      .systemMaterial(uiMaterial.Material.empty).backgroundColor(Color.Transparent)
+      .onSelect((index: number) => { $$.change(index); })
+    }.padding({ right: 16 })
+  }
+  @Builder
+  private inputRow($$: InputEntry) {
+    if ($$.type === InputType.Number || $$.type === InputType.NUMBER_DECIMAL) {
+      HdsListItemCard({ cardPrefixMargin: 0, cardSuffixMargin: 0, cardBorderRadius: 0,
+        textItem: { primaryText: this.listPrimaryText($$.title),
+          secondaryText: $$.subtitle ? { text: $$.subtitle, modifier: new TextModifier().fontSize(12)
+            .fontColor($r('sys.color.font_secondary')).padding({ left: 8 }) } : undefined },
+        suffixItem: new SuffixCustomBuilder(() => { this.numberControl($$); }), enable: !this.busy })
+    } else {
+    Column({ space: 4 }) {
+      Text($$.title).fontSize(14).fontColor($r('sys.color.font_secondary')).width('100%')
+      TextInput({ text: $$.value, placeholder: $$.placeholder || '' }).id($$.id || $$.title)
+        .type($$.type === undefined ? InputType.Normal : $$.type).maxLength($$.maxLength === undefined ? Infinity : $$.maxLength)
+        .fontSize(16).fontColor($r('sys.color.font_primary')).placeholderFont({ size: 16 })
+        .placeholderColor($r('sys.color.font_secondary'))
+        .width('100%').height(Math.max(40, 24 * (this.context().config.fontSizeScale ?? 1) + 8))
+        .align(Alignment.Center).textAlign(TextAlign.Start)
+        .backgroundColor(Color.Transparent).borderRadius(0).padding({ left: 0, right: 0, top: 4, bottom: 4 })
+        .accessibilityText($$.title).onChange((value: string) => { $$.change(value); })
+    }.padding({ left: 16, right: 16, top: 12, bottom: 4 }).width('100%')
+    }
+  }
+  @Builder
+  private numberControl($$: InputEntry) {
+    Row() {
+      TextInput({ text: $$.value, placeholder: $$.placeholder || '' }).id($$.id || $$.title)
+        .type($$.type!).fontSize(16).fontColor($r('sys.color.font_secondary')).placeholderFont({ size: 14 })
+        .placeholderColor($r('sys.color.font_secondary')).width(104)
+        .height(Math.max(40, 24 * (this.context().config.fontSizeScale ?? 1) + 8))
+        .align(Alignment.Center).textAlign(TextAlign.End).backgroundColor(Color.Transparent).borderRadius(0)
+        .padding({ left: 4, right: 4, top: 4, bottom: 4 }).enabled(!this.busy)
+        .accessibilityText($$.title).onChange((value: string) => { $$.change(value); })
+    }.padding({ right: 16 })
+  }
+  @Builder
+  private longValue($$: DetailPair) {
+    Column({ space: 6 }) {
+      Text($$.label).fontSize(14).fontColor($r('sys.color.font_secondary')).width('100%')
+      Text($$.value).fontSize(16).fontColor($r('sys.color.font_primary')).width('100%')
+        .wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
+    }.padding(16).width('100%')
+    if (!$$.last) { this.cardDivider() }
   }
   @Builder
   private empty(title: string, subtitle: string) {
@@ -882,145 +1055,167 @@ export struct Home {
   @Builder
   private serversPage() {
     Scroll(this.pageScroller('servers')) {
-      Column({ space: 16 }) {
+      Column({ space: 12 }) {
         this.notice()
-        ForEach(this.profiles, (profile: ServerProfile) => {
-          HdsListItemCard({ textItem: {
-            primaryText: { text: profile.name + (profile.id === this.activeId ? ' · 当前' : '') },
-            secondaryText: { text: this.settings.hideUrls ? '编辑服务器配置' : profile.url }
-          }, suffixItem: new SuffixArrow(), onClick: () => { this.editServer(profile); }, enable: !this.busy }).width('100%')
-        }, (profile: ServerProfile) => JSON.stringify(profile))
-        if (this.profiles.length === 0) { this.empty('尚未添加服务器', '轻点右上角添加你的 qBittorrent 服务器。') }
-      }.padding(16).width('100%')
-    }.align(Alignment.TopStart).width('100%').height('100%')
-  }
-  @Builder
-  private settingText(entry: SettingsEntry) {
-    Column({ space: 2 }) {
-      Text(entry.title).fontSize(16).fontColor($r('sys.color.font_primary')).width('100%')
-      if (entry.subtitle) {
-        Text(entry.subtitle).fontSize(14).fontColor($r('sys.color.font_secondary')).width('100%')
-      }
-    }.alignItems(HorizontalAlign.Start).width('100%').padding({ left: 12, right: 12 })
+        if (this.profiles.length > 0) {
+          Column() {
+            ForEach(this.profiles, (profile: ServerProfile, index: number) => {
+              HdsListItemCard({ cardPrefixMargin: 0, cardSuffixMargin: 0, cardBorderRadius: 0,
+                textItem: { primaryText: this.listPrimaryText(profile.name + (profile.id === this.activeId ? ' · 当前' : '')),
+                  secondaryText: this.settings.hideUrls ? undefined : { text: profile.url,
+                    modifier: new TextModifier().fontSize(14).fontColor($r('sys.color.font_secondary')).padding({ left: 8 }) } },
+                suffixItem: new SuffixArrow(), onClick: () => { this.editServer(profile); }, enable: !this.busy })
+              if (index < this.profiles.length - 1) { this.cardDivider() }
+            }, (profile: ServerProfile) => JSON.stringify(profile))
+          }.groupedCard()
+        } else { this.empty('尚未添加服务器', '轻点右上角添加你的 qBittorrent 服务器。') }
+      }.padding({ left: 16, right: 16, top: 12, bottom: 24 }).width('100%')
+    }.secondaryScroll()
   }
   @Builder
   private settingRow($$: SettingsEntry) {
-    HdsListItemCard({
-      cardPrefixMargin: 0,
-      cardSuffixMargin: 0,
-
-      textItem: { customBuilder: () => { this.settingText($$); } },
-      suffixItem: new SuffixArrow(),
-      onClick: () => { this.paths.pushPathByName($$.route, null); }, enable: !this.busy
-    }).width('100%')
+    HdsListItemCard({ cardPrefixMargin: 0, cardSuffixMargin: 0, cardBorderRadius: 0,
+      textItem: { primaryText: this.listPrimaryText($$.title) },
+      suffixItem: $$.subtitle ? new SuffixTextAndArrow({ text: $$.subtitle,
+        modifier: new TextModifier().fontSize(14).fontColor($r('sys.color.font_secondary')) }, { color: $r('sys.color.icon_tertiary') })
+        : new SuffixArrow({ color: $r('sys.color.icon_tertiary') }),
+      onClick: () => { this.paths.pushPathByName($$.route, null); }, enable: !this.busy })
   }
   @Builder
   private actionRow($$: ActionEntry) {
-    HdsListItemCard({ cardPrefixMargin: 0, cardSuffixMargin: 0,
-      textItem: { customBuilder: () => { this.settingText({ title: $$.title, subtitle: '', route: '' }); } },
-      onClick: $$.action, enable: !this.busy }).width('100%')
+    HdsListItemCard({ cardPrefixMargin: 0, cardSuffixMargin: 0, cardBorderRadius: 0,
+      textItem: { primaryText: this.listPrimaryText($$.title, $$.destructive === true) },
+      suffixItem: $$.opensPage ? new SuffixArrow() : undefined,
+      onClick: $$.action, enable: !this.busy })
   }
   @Builder
   private settingsPage() {
     Scroll(this.settingsScroller) {
       Column({ space: 12 }) {
         this.notice()
-        this.settingRow({ title: '服务器', subtitle: `${this.profiles.length} 个配置`, route: 'servers' })
-        this.settingRow({ title: '常规', subtitle: '', route: 'general' })
-        this.settingRow({ title: '外观', subtitle: ['跟随系统', '浅色模式', '深色模式'][this.settings.theme], route: 'appearance' })
-        this.settingRow({ title: '网络', subtitle: '', route: 'network' })
-        this.settingRow({ title: '通知', subtitle: '', route: 'notifications' })
-        if (this.connected) {
-          this.settingRow({ title: '连接与传输', subtitle: '', route: 'connection' })
-        }
-        this.settingRow({ title: '关于', subtitle: 'QBit Harmony 0.1.0 · GPL-3.0', route: 'about' })
+        Column() {
+          this.settingRow({ title: '服务器', subtitle: `${this.profiles.length} 个配置`, route: 'servers' })
+        }.groupedCard()
+        Column() {
+          this.settingRow({ title: '常规', subtitle: '', route: 'general' })
+          this.cardDivider()
+          this.settingRow({ title: '外观', subtitle: ['跟随系统', '浅色模式', '深色模式'][this.settings.theme], route: 'appearance' })
+          this.cardDivider()
+          this.settingRow({ title: '网络', subtitle: '', route: 'network' })
+          this.cardDivider()
+          this.settingRow({ title: '通知', subtitle: this.notificationStatus, route: 'notifications' })
+        }.groupedCard()
+        Column() {
+          if (this.connected) {
+            this.settingRow({ title: '连接与传输', subtitle: '', route: 'connection' })
+            this.cardDivider()
+          }
+          this.settingRow({ title: '关于', subtitle: '0.1.0', route: 'about' })
+        }.groupedCard()
       }.padding({ left: 16, right: 16, top: 72 + this.getUIContext().px2vp(this.statusBarHeightPx), bottom: 96 }).width('100%')
-    }.align(Alignment.TopStart).width('100%').height('100%')
+    }.secondaryScroll()
   }
   @Builder
   private preferencesPage(name: string) {
-    Column({ space: 20 }) {
+    Column({ space: 12 }) {
       this.notice()
       if (name === 'general') {
-        Row() {
-          Text('记住上次使用的服务器').layoutWeight(1)
-          Toggle({ type: ToggleType.Switch, isOn: this.settings.rememberServer }).onChange((v: boolean) => { this.settings.rememberServer = v; this.saveSettings(); })
-        }.width('100%')
-        Row() {
-          Text('隐藏服务器地址').layoutWeight(1)
-          Toggle({ type: ToggleType.Switch, isOn: this.settings.hideUrls }).onChange((v: boolean) => { this.settings.hideUrls = v; this.saveSettings(); })
-        }.width('100%')
+        Column() {
+          this.switchRow({ title: '记住上次使用的服务器', checked: this.settings.rememberServer,
+            change: (v: boolean) => { this.settings.rememberServer = v; this.saveSettings(); } })
+          this.cardDivider()
+          this.switchRow({ title: '隐藏服务器地址', checked: this.settings.hideUrls,
+            change: (v: boolean) => { this.settings.hideUrls = v; this.saveSettings(); } })
+        }.groupedCard()
       } else if (name === 'notifications') {
-        Row() {
-          Text('任务完成通知').layoutWeight(1)
-          Toggle({ type: ToggleType.Switch, isOn: this.notificationEnabled }).enabled(!this.busy)
-            .onChange((v: boolean) => { if (v !== this.notificationEnabled) { this.configureNotifications(v ? 'enable' : 'disable'); } })
-        }.width('100%')
-        this.pair({ label: '通知状态', value: this.notificationStatus })
-        this.pair({ label: '后台检查', value: '系统调度，可能延迟数小时' })
-        this.actionRow({ title: '系统通知设置', action: () => { this.configureNotifications('settings'); } })
+        Column() {
+          this.switchRow({ title: '下载完成通知', checked: this.notificationEnabled,
+            change: (v: boolean) => { this.configureNotifications(v ? 'enable' : 'disable'); } })
+          this.cardDivider()
+          this.pair({ label: '通知状态', value: this.notificationStatus, last: true })
+        }.groupedCard()
+        Column() {
+          this.pair({ label: '后台检查', value: '系统调度，可能延迟数小时' })
+          this.actionRow({ title: '系统通知设置', opensPage: true, action: () => { this.configureNotifications('settings'); } })
+        }.groupedCard()
       } else if (name === 'appearance') {
-        this.label('颜色模式')
-        Select([{ value: '跟随系统' }, { value: '浅色模式' }, { value: '深色模式' }])
-          .selected(this.settings.theme).value(['跟随系统', '浅色模式', '深色模式'][this.settings.theme])
-          .onSelect((i: number) => { this.settings.theme = i; this.saveSettings(); }).width('100%')
+        Column() {
+          this.choiceRow({ title: '颜色模式', options: ['跟随系统', '浅色模式', '深色模式'], selected: this.settings.theme,
+            value: ['跟随系统', '浅色模式', '深色模式'][this.settings.theme],
+            change: (i: number) => { this.settings.theme = i; this.saveSettings(); } })
+        }.groupedCard()
       } else if (name === 'network') {
-        this.label('自动刷新间隔')
-        Select([{ value: '手动刷新' }, { value: '3 秒' }, { value: '5 秒' }, { value: '10 秒' }, { value: '30 秒' }])
-          .selected([0, 3, 5, 10, 30].indexOf(this.settings.refreshSeconds))
-          .value(this.settings.refreshSeconds ? `${this.settings.refreshSeconds} 秒` : '手动刷新')
-          .onSelect((i: number) => { this.settings.refreshSeconds = [0, 3, 5, 10, 30][i]; this.saveSettings(); }).width('100%')
-        this.label('连接超时')
-        Select([{ value: '5 秒' }, { value: '10 秒' }, { value: '20 秒' }, { value: '30 秒' }])
-          .selected([5, 10, 20, 30].indexOf(this.settings.timeoutSeconds)).value(`${this.settings.timeoutSeconds} 秒`)
-          .onSelect((i: number) => { this.settings.timeoutSeconds = [5, 10, 20, 30][i]; this.saveSettings(); }).width('100%')
+        Column() {
+          this.choiceRow({ title: '自动刷新间隔', options: ['手动刷新', '3 秒', '5 秒', '10 秒', '30 秒'],
+            selected: [0, 3, 5, 10, 30].indexOf(this.settings.refreshSeconds), value: this.settings.refreshSeconds ? `${this.settings.refreshSeconds} 秒` : '手动刷新',
+            change: (i: number) => { this.settings.refreshSeconds = [0, 3, 5, 10, 30][i]; this.saveSettings(); } })
+          this.cardDivider()
+          this.choiceRow({ title: '连接超时', options: ['5 秒', '10 秒', '20 秒', '30 秒'],
+            selected: [5, 10, 20, 30].indexOf(this.settings.timeoutSeconds), value: `${this.settings.timeoutSeconds} 秒`,
+            change: (i: number) => { this.settings.timeoutSeconds = [5, 10, 20, 30][i]; this.saveSettings(); } })
+        }.groupedCard()
       } else if (name === 'connection') {
-        this.pair({ label: '服务器', value: this.activeName })
-        this.pair({ label: '版本', value: this.version })
-        this.pair({ label: '连接状态', value: this.transfer.connection_status || '—' })
-        this.pair({ label: '累计下载', value: bytes(this.transfer.dl_info_data) })
-        this.pair({ label: '累计上传', value: bytes(this.transfer.up_info_data) })
-        Button('速度限制').width('100%').onClick(() => {
-          this.downloadLimit = String(Math.round(this.transfer.dl_rate_limit / 1024));
-          this.uploadLimit = String(Math.round(this.transfer.up_rate_limit / 1024));
-          this.paths.pushPathByName('limits', null);
-        })
+        Column() {
+          this.pair({ label: '服务器', value: this.activeName })
+          this.pair({ label: '版本', value: this.version })
+          this.pair({ label: '连接状态', value: this.transfer.connection_status === 'connected' ? '已连接' : this.transfer.connection_status === 'firewalled' ? '连接受限' : this.transfer.connection_status === 'disconnected' ? '未连接' : '—', last: true })
+        }.groupedCard()
+        Column() {
+          this.pair({ label: '累计下载', value: bytes(this.transfer.dl_info_data) })
+          this.pair({ label: '累计上传', value: bytes(this.transfer.up_info_data) })
+          this.actionRow({ title: '速度限制', opensPage: true, action: () => {
+            this.downloadLimit = String(Math.round(this.transfer.dl_rate_limit / 1024));
+            this.uploadLimit = String(Math.round(this.transfer.up_rate_limit / 1024));
+            this.paths.pushPathByName('limits', null);
+          } })
+        }.groupedCard()
       } else if (name === 'switch') {
-        ForEach(this.profiles, (profile: ServerProfile) => {
-          Button(profile.name + (profile.id === this.activeId ? ' · 当前' : '')).width('100%').enabled(!this.busy)
-            .onClick(() => { this.connectSaved(profile); })
-        }, (profile: ServerProfile) => profile.id)
+        Column() {
+          ForEach(this.profiles, (profile: ServerProfile, index: number) => {
+            this.actionRow({ title: profile.name + (profile.id === this.activeId ? ' · 当前' : ''), action: () => { this.connectSaved(profile); } })
+            if (index < this.profiles.length - 1) { this.cardDivider() }
+          }, (profile: ServerProfile) => profile.id)
+        }.groupedCard()
       } else if (name === 'filters') {
-        this.label('任务状态')
-        Select(FILTER_LABELS.map((value: string): SelectOption => { return { value: value }; }))
-          .selected(this.filter).value(FILTER_LABELS[this.filter]).onSelect((i: number) => { this.filter = i; }).width('100%')
-        this.label('排序')
-        Select(SORT_LABELS.map((value: string): SelectOption => { return { value: value }; }))
-          .selected(this.sort).value(SORT_LABELS[this.sort]).onSelect((i: number) => { this.sort = i; this.saveSort(); }).width('100%')
-        Row() {
-          Text('反向排序').layoutWeight(1)
-          Toggle({ type: ToggleType.Switch, isOn: this.reverseSort }).onChange((v: boolean) => { this.reverseSort = v; this.saveSort(); })
-        }.width('100%')
-        this.label('分类')
-        Select(['全部分类', '未分类'].concat(this.categories.map((c: Category) => c.name)).map((value: string): SelectOption => { return { value: value }; }))
-          .value(this.categoryFilter === '\u0000' ? '未分类' : this.categoryFilter || '全部分类')
-          .onSelect((i: number) => { this.categoryFilter = i === 0 ? '' : i === 1 ? '\u0000' : this.categories[i - 2].name; }).width('100%')
-        this.label('标签')
-        Select(['全部标签', '无标签'].concat(this.tags).map((value: string): SelectOption => { return { value: value }; }))
-          .value(this.tagFilter === '\u0000' ? '无标签' : this.tagFilter || '全部标签')
-          .onSelect((i: number) => { this.tagFilter = i === 0 ? '' : i === 1 ? '\u0000' : this.tags[i - 2]; }).width('100%')
-        this.label('Tracker')
-        Select(['全部 Tracker', '无 Tracker'].concat(Object.keys(this.trackerMap)).map((value: string): SelectOption => { return { value: value }; }))
-          .value(this.trackerFilter === '\u0000' ? '无 Tracker' : this.trackerFilter || '全部 Tracker')
-          .onSelect((i: number) => { this.trackerFilter = i === 0 ? '' : i === 1 ? '\u0000' : Object.keys(this.trackerMap)[i - 2]; }).width('100%')
-        Button('重置筛选').width('100%').onClick(() => { this.filter = 0; this.query = ''; this.categoryFilter = ''; this.tagFilter = ''; this.trackerFilter = ''; })
+        Column() {
+          this.choiceRow({ title: '任务状态', options: FILTER_LABELS, selected: this.filter, value: FILTER_LABELS[this.filter], change: (i: number) => { this.filter = i; } })
+          this.cardDivider()
+          this.choiceRow({ title: '排序', options: SORT_LABELS, selected: this.sort, value: SORT_LABELS[this.sort], change: (i: number) => { this.sort = i; this.saveSort(); } })
+          this.cardDivider()
+          this.switchRow({ title: '反向排序', checked: this.reverseSort, change: (v: boolean) => { this.reverseSort = v; this.saveSort(); } })
+        }.groupedCard()
+        Column() {
+          this.choiceRow({ title: '分类', options: ['全部分类', '未分类'].concat(this.categories.map((c: Category): string => c.name)),
+            selected: this.categoryFilter === '\u0000' ? 1 : this.categoryFilter ? this.categories.findIndex((c: Category): boolean => c.name === this.categoryFilter) + 2 : 0,
+            value: this.categoryFilter === '\u0000' ? '未分类' : this.categoryFilter || '全部分类',
+            change: (i: number) => { this.categoryFilter = i === 0 ? '' : i === 1 ? '\u0000' : this.categories[i - 2].name; } })
+          this.cardDivider()
+          this.choiceRow({ title: '标签', options: ['全部标签', '无标签'].concat(this.tags),
+            selected: this.tagFilter === '\u0000' ? 1 : this.tagFilter ? this.tags.indexOf(this.tagFilter) + 2 : 0,
+            value: this.tagFilter === '\u0000' ? '无标签' : this.tagFilter || '全部标签',
+            change: (i: number) => { this.tagFilter = i === 0 ? '' : i === 1 ? '\u0000' : this.tags[i - 2]; } })
+          this.cardDivider()
+          this.choiceRow({ title: 'Tracker', options: ['全部 Tracker', '无 Tracker'].concat(Object.keys(this.trackerMap)),
+            selected: this.trackerFilter === '\u0000' ? 1 : this.trackerFilter ? Object.keys(this.trackerMap).indexOf(this.trackerFilter) + 2 : 0,
+            value: this.trackerFilter === '\u0000' ? '无 Tracker' : this.trackerFilter || '全部 Tracker',
+            change: (i: number) => { this.trackerFilter = i === 0 ? '' : i === 1 ? '\u0000' : Object.keys(this.trackerMap)[i - 2]; } })
+        }.groupedCard()
+        Column() {
+          this.actionRow({ title: '重置筛选', action: () => { this.filter = 0; this.query = ''; this.categoryFilter = ''; this.tagFilter = ''; this.trackerFilter = ''; } })
+        }.groupedCard()
         Button('完成').width('100%').onClick(() => { this.paths.pop(); })
       } else {
-        Text('QBit Harmony').fontSize(28).fontWeight(FontWeight.Bold)
-        Text('qBitController 核心功能的鸿蒙原生移植').fontSize(15)
-        this.label('版本 0.1.0 · GPL-3.0\n原项目：Bartuzen/qBitController')
+        Column({ space: 8 }) {
+          Image($r('app.media.qbit_icon')).width(64).height(64).borderRadius(16)
+          Text('下载遥控').fontSize(24).fontWeight(FontWeight.Medium).fontColor($r('sys.color.font_primary'))
+          Text('0.1.0').fontSize(14).fontColor($r('sys.color.font_secondary'))
+        }.width('100%').padding({ top: 24, bottom: 24 })
+        Column() {
+          this.pair({ label: '开源许可', value: 'GPL-3.0' })
+          this.longValue({ label: '原项目', value: 'Bartuzen/qBitController', last: true })
+        }.groupedCard()
       }
-    }.padding(20).width('100%')
+    }.padding({ left: 16, right: 16, top: 12, bottom: 24 }).width('100%')
   }
   private pageTitle(name: string): string {
     if (name === 'notifications') { return '通知'; }
@@ -1044,242 +1239,402 @@ export struct Home {
   }
   @Builder
   private serverForm() {
-    Column({ space: 16 }) {
+    Column({ space: 12 }) {
       this.notice()
-      this.label('名称')
-      TextInput({ text: this.serverName, placeholder: '例如：家里的 NAS' }).id('serverName').maxLength(80).onChange((v: string) => { this.serverName = v; })
-      this.label('qBittorrent WebUI 地址')
-      TextInput({ text: this.serverUrl, placeholder: 'http://192.168.1.10:8080' }).id('serverUrl').onChange((v: string) => { this.serverUrl = v; })
-      this.label('用户名')
-      TextInput({ text: this.username, placeholder: 'admin' }).id('serverUsername').onChange((v: string) => { this.username = v; })
-      this.label('密码')
-      TextInput({ text: this.password, placeholder: 'WebUI 密码' }).id('serverPassword').type(InputType.Password).onChange((v: string) => { this.password = v; })
-      Row() {
-        Text('安全保存密码').layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.remember }).onChange((v: boolean) => { this.remember = v; })
-      }.width('100%')
-      Button('测试配置').backgroundColor($r('sys.color.comp_background_tertiary')).fontColor($r('sys.color.brand')).width('100%').enabled(!this.busy).onClick(() => { this.testServer(); })
-      Button(this.busy ? '正在保存…' : '保存').id('saveServer').width('100%').backgroundColor($r('sys.color.brand')).enabled(!this.busy).onClick(() => { this.saveServer(); })
+      Column() {
+        this.inputRow({ title: '名称', value: this.serverName, placeholder: '例如：家里的 NAS', id: 'serverName', maxLength: 80, change: (v: string) => { this.serverName = v; } })
+        this.cardDivider()
+        this.inputRow({ title: 'qBittorrent WebUI 地址', value: this.serverUrl, placeholder: 'http://192.168.1.10:8080', id: 'serverUrl', change: (v: string) => { this.serverUrl = v; } })
+      }.groupedCard()
+      Column() {
+        this.inputRow({ title: '用户名', value: this.username, placeholder: 'admin', id: 'serverUsername', change: (v: string) => { this.username = v; } })
+        this.cardDivider()
+        this.inputRow({ title: '密码', value: this.password, placeholder: 'WebUI 密码', type: InputType.Password, id: 'serverPassword', change: (v: string) => { this.password = v; } })
+        this.cardDivider()
+        this.switchRow({ title: '安全保存密码', checked: this.remember, change: (v: boolean) => { this.remember = v; } })
+      }.groupedCard()
+      Column() {
+        this.actionRow({ title: '测试配置', action: () => { this.testServer(); } })
+      }.groupedCard()
+      Button(this.busy ? '正在保存…' : '保存').id('saveServer').width('100%').enabled(!this.busy).onClick(() => { this.saveServer(); })
       if (this.editId) {
-        Button('删除此服务器配置').width('100%').fontColor($r('sys.color.warning')).backgroundColor($r('sys.color.comp_background_tertiary')).enabled(!this.busy).onClick(() => {
-          const profile = this.profiles.find((p: ServerProfile) => p.id === this.editId);
-          if (profile) { this.forgetServer(profile); }
-        })
+        Column() {
+          this.actionRow({ title: '删除此服务器配置', destructive: true, action: () => {
+            const profile = this.profiles.find((p: ServerProfile) => p.id === this.editId);
+            if (profile) { this.forgetServer(profile); }
+          } })
+        }.groupedCard()
       }
-    }.padding(20).width('100%')
+    }.padding({ left: 16, right: 16, top: 12, bottom: 24 }).width('100%')
   }
   @Builder
   private addForm() {
-    Column({ space: 16 }) {
+    Column({ space: 12 }) {
       this.notice()
-      this.label('目标服务器')
-      if (this.profiles.length > 0) {
-        Select(this.profiles.map((p: ServerProfile): SelectOption => { return { value: p.name }; }))
-          .value(this.activeName || '选择服务器').selected(this.profiles.findIndex((p: ServerProfile): boolean => p.id === this.activeId))
-          .onSelect((index: number) => { this.connectSaved(this.profiles[index], false); }).width('100%')
-        if (!this.connected) {
-          Button('连接服务器').onClick(() => {
-            const profile = this.profiles.find((p: ServerProfile): boolean => p.id === this.activeId) || this.profiles[0];
-            this.connectSaved(profile, false);
-          })
+      Column() {
+        if (this.profiles.length > 0) {
+          this.choiceRow({ title: '目标服务器', options: this.profiles.map((p: ServerProfile): string => p.name),
+            value: this.activeName || '选择服务器', selected: this.profiles.findIndex((p: ServerProfile): boolean => p.id === this.activeId),
+            change: (index: number) => { this.connectSaved(this.profiles[index], false); } })
+          if (!this.connected) {
+            this.cardDivider()
+            this.actionRow({ title: '连接服务器', action: () => {
+              const profile = this.profiles.find((p: ServerProfile): boolean => p.id === this.activeId) || this.profiles[0];
+              this.connectSaved(profile, false);
+            } })
+          }
+        } else { this.actionRow({ title: '添加服务器', opensPage: true, action: () => { this.newServer(); } }) }
+      }.groupedCard()
+      Column() {
+        Column({ space: 8 }) {
+          Text('磁力链接 / 种子下载地址').fontSize(14).fontColor($r('sys.color.font_secondary')).width('100%')
+          TextArea({ text: this.links, placeholder: 'magnet:?xt=urn:btih:…\n支持多个链接，每行一个' }).id('torrentLinks')
+            .height(128).fontSize(16).fontColor($r('sys.color.font_primary')).placeholderFont({ size: 16 })
+            .placeholderColor($r('sys.color.font_secondary')).backgroundColor(Color.Transparent).borderRadius(0)
+            .padding(0).enabled(!this.uploadName).onChange((v: string) => { this.links = v; })
+        }.padding(16).width('100%')
+        this.cardDivider()
+        this.actionRow({ title: this.uploadName || '选择 .torrent 文件', opensPage: true, action: () => { this.pickTorrent(); } })
+        if (this.uploadName) {
+          this.cardDivider()
+          this.actionRow({ title: '取消文件，改用链接', action: () => { this.upload = undefined; this.uploadName = ''; } })
         }
-      } else { Button('添加服务器').onClick(() => { this.newServer(); }) }
-      this.label('磁力链接 / 种子下载地址')
-      TextArea({ text: this.links, placeholder: 'magnet:?xt=urn:btih:…\n支持多个链接，每行一个' }).id('torrentLinks')
-        .height(150).enabled(!this.uploadName).onChange((v: string) => { this.links = v; })
-      Button(this.uploadName || '选择 .torrent 文件').width('100%').onClick(() => { this.pickTorrent(); })
-      if (this.uploadName) { Button('取消文件，改用链接').onClick(() => { this.upload = undefined; this.uploadName = ''; }) }
-      this.label('服务器保存路径（可选）')
-      TextInput({ text: this.savePath, placeholder: '留空使用服务器默认路径' }).onChange((v: string) => { this.savePath = v; })
-      this.label('分类（可选）')
-      Select(this.categoryOptions())
-        .value(this.addCategory || '未分类').onSelect((i: number) => { this.addCategory = i === 0 ? '' : this.categories[i - 1].name; }).width('100%')
-      this.label('标签（逗号分隔）')
-      TextInput({ text: this.addOptions.tags, placeholder: '例如：Linux,iso' }).onChange((v: string) => { this.addOptions.tags = v; })
-      this.label('重命名（可选）')
-      TextInput({ text: this.addOptions.rename, placeholder: '保留原种子名称' }).onChange((v: string) => { this.addOptions.rename = v; })
-      Row() {
-        Text('添加后暂停').layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.startStopped }).onChange((v: boolean) => { this.startStopped = v; })
-      }.width('100%')
-      Row() {
-        Text('顺序下载').layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.addOptions.sequential }).onChange((v: boolean) => { this.addOptions.sequential = v; })
-      }.width('100%')
-      Row() {
-        Text('优先下载首尾分块').layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.addOptions.firstLast }).onChange((v: boolean) => { this.addOptions.firstLast = v; })
-      }.width('100%')
-      this.label('种子管理模式')
-      Select([{ value: '使用服务器默认' }, { value: '手动管理' }, { value: '自动管理' }])
-        .selected(this.addOptions.autoTmm).value(['使用服务器默认', '手动管理', '自动管理'][this.addOptions.autoTmm])
-        .onSelect((i: number) => { this.addOptions.autoTmm = i; }).width('100%')
-      this.label('下载 / 上传限速（KiB/s）')
-      Row({ space: 8 }) {
-        TextInput({ text: this.addOptions.downloadLimit, placeholder: '下载' }).type(InputType.Number).layoutWeight(1).onChange((v: string) => { this.addOptions.downloadLimit = v; })
-        TextInput({ text: this.addOptions.uploadLimit, placeholder: '上传' }).type(InputType.Number).layoutWeight(1).onChange((v: string) => { this.addOptions.uploadLimit = v; })
-      }
-      Button('添加下载任务').id('addTorrent').width('100%').backgroundColor($r('sys.color.brand')).enabled(!this.busy && this.connected).onClick(() => { this.addTorrent(); })
-    }.padding(20).width('100%').enabled(!this.busy)
+      }.groupedCard()
+      Column() {
+        this.inputRow({ title: '服务器保存路径', value: this.savePath, placeholder: '留空使用服务器默认路径', change: (v: string) => { this.savePath = v; } })
+        this.cardDivider()
+        this.choiceRow({ title: '分类', options: ['未分类'].concat(this.categories.map((c: Category): string => c.name)),
+          value: this.addCategory || '未分类', selected: this.addCategory ? this.categories.findIndex((c: Category): boolean => c.name === this.addCategory) + 1 : 0,
+          change: (i: number) => { this.addCategory = i === 0 ? '' : this.categories[i - 1].name; } })
+        this.cardDivider()
+        this.inputRow({ title: '标签', value: this.addOptions.tags, placeholder: '多个标签用逗号分隔', change: (v: string) => { this.addOptions.tags = v; } })
+        this.cardDivider()
+        this.inputRow({ title: '重命名', value: this.addOptions.rename, placeholder: '留空保留原种子名称', change: (v: string) => { this.addOptions.rename = v; } })
+      }.groupedCard()
+      Column() {
+        this.switchRow({ title: '添加后暂停', checked: this.startStopped, change: (v: boolean) => { this.startStopped = v; } })
+        this.cardDivider()
+        this.switchRow({ title: '顺序下载', checked: this.addOptions.sequential, change: (v: boolean) => { this.addOptions.sequential = v; } })
+        this.cardDivider()
+        this.switchRow({ title: '优先下载首尾分块', checked: this.addOptions.firstLast, change: (v: boolean) => { this.addOptions.firstLast = v; } })
+        this.cardDivider()
+        this.choiceRow({ title: '种子管理模式', options: ['使用服务器默认', '手动管理', '自动管理'],
+          selected: this.addOptions.autoTmm, value: ['使用服务器默认', '手动管理', '自动管理'][this.addOptions.autoTmm],
+          change: (i: number) => { this.addOptions.autoTmm = i; } })
+      }.groupedCard()
+      Column() {
+        this.inputRow({ title: '下载限速', subtitle: 'KiB/s，0 为不限速', value: this.addOptions.downloadLimit, placeholder: '0 为不限速', type: InputType.Number, change: (v: string) => { this.addOptions.downloadLimit = v; } })
+        this.cardDivider()
+        this.inputRow({ title: '上传限速', subtitle: 'KiB/s，0 为不限速', value: this.addOptions.uploadLimit, placeholder: '0 为不限速', type: InputType.Number, change: (v: string) => { this.addOptions.uploadLimit = v; } })
+      }.groupedCard()
+      Button('添加下载任务').id('addTorrent').width('100%').enabled(!this.busy && this.connected).onClick(() => { this.addTorrent(); })
+    }.padding({ left: 16, right: 16, top: 12, bottom: 24 }).width('100%').enabled(!this.busy)
+  }
+  @LocalBuilder
+  private detailTabs() {
+    DetailTabStrip({ selection: this.detailTabSelection, change: (index: number) => {
+      this.detailTabsController.changeIndex(index);
+    }, measure: () => { this.updateDetailHeaderBounds(); } })
+  }
+  private detailContentInset(): number {
+    // 视口延伸到屏幕顶部；首项只避让实际可见的原生标题和页签。
+    return (this.detailHeaderBottom || this.getUIContext().px2vp(this.statusBarHeightPx) + 100) + 12;
+  }
+  @Builder
+  private detailListInset() {
+    ListItem() { Row() {} }.height(this.detailContentInset()).hitTestBehavior(HitTestMode.None).accessibilityLevel('no')
+  }
+  private updateDetailHeaderBounds(): void {
+    const node = this.getUIContext().getFrameNodeById('detailTabStrip');
+    if (!node) { return; }
+    const bottom = node.getPositionToWindowWithTransform().y + this.getUIContext().px2vp(node.getMeasuredSize().height);
+    if (Math.abs(bottom - this.detailHeaderBottom) > 0.5) {
+      this.detailHeaderBottom = bottom;
+    }
+  }
+  private rememberDetailScroll(index: number): void {
+    this.detailScrollOffsets[index] = Math.max(0, this.pageScroller('detail-' + index).currentOffset().yOffset);
+  }
+  private activateDetailTab(index: number): void {
+    // 切换开始时改绑目标页，避免沿用上一页的标题安全区和模糊进度。
+    this.updateDetailHeaderBounds();
+    this.detailTabSelection.index = index;
+  }
+  private restoreDetailScroll(index: number): void {
+    // 列表首次进入时可能尚未布局，待切换落定后的布局帧再恢复。
+    this.getUIContext().postFrameCallback(new DetailLayoutReady(() => {
+      if (index !== this.detailTabSelection.index) { return; }
+      this.updateDetailHeaderBounds();
+      this.pageScroller('detail-' + index).scrollTo({ xOffset: 0,
+        yOffset: this.detailScrollOffsets[index], animation: false });
+    }));
+  }
+  @Builder
+  private detailSummary() {
+      Column({ space: 10 }) {
+        Text(this.selected!.name).fontSize(16).fontWeight(FontWeight.Medium).maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('sys.color.font_primary')).width('100%').copyOption(CopyOptions.LocalDevice)
+        Progress({ value: percent(this.selected!.progress), total: 100, type: ProgressType.Linear }).width('100%').color($r('sys.color.brand'))
+        Row() {
+          Text(stateLabel(this.selected!.state)).fontSize(12).fontColor($r('sys.color.font_secondary')).layoutWeight(1)
+          Text(`${percent(this.selected!.progress)}% · ${bytes(this.selected!.size)}`).fontSize(12).fontColor($r('sys.color.font_secondary'))
+        }.width('100%')
+      }.padding(16).groupedCard()
   }
   @Builder
   private detailPage() {
-    Column({ space: 12 }) {
-      this.notice()
-      Text(this.selected!.name).fontSize(18).fontWeight(FontWeight.Medium).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%').copyOption(CopyOptions.LocalDevice)
-      Progress({ value: percent(this.selected!.progress), total: 100, type: ProgressType.Linear }).width('100%').color($r('sys.color.brand'))
-      Text(`${stateLabel(this.selected!.state)} · ${percent(this.selected!.progress)}%`).fontSize(14).fontColor($r('sys.color.font_secondary')).width('100%')
-      Tabs({ index: this.detailTab }) {
+    Column() {
+      Tabs({ index: this.detailContentIndex, controller: this.detailTabsController }) {
         TabContent() {
           Scroll(this.pageScroller('detail-0')) {
-            Column() {
-              this.label('基本信息')
-              this.pair({ label: '添加时间', value: this.dateText(this.properties.addition_date || this.selected!.added_on) })
-              this.pair({ label: '完成时间', value: this.dateText(this.properties.completion_date || this.selected!.completion_on) })
-              this.pair({ label: '任务大小', value: bytes(this.selected!.size) })
-              this.label('传输信息')
-              if (this.detailError) { this.label('详情刷新失败：' + this.detailError) }
-              this.pair({ label: '活动时间', value: this.elapsedText(this.selected!.time_active) })
-              this.pair({ label: '做种时间', value: this.elapsedText(this.selected!.seeding_time) })
-              this.pair({ label: '已下载', value: this.amountText(this.selected!.downloaded) })
-              this.pair({ label: '本次下载', value: this.amountText(this.selected!.downloaded_session) })
-              this.pair({ label: '已上传', value: this.amountText(this.selected!.uploaded) })
-              this.pair({ label: '本次上传', value: this.amountText(this.selected!.uploaded_session) })
-              this.pair({ label: '最近活动', value: this.dateText(this.selected!.last_activity) })
-              this.pair({ label: '上次见到完整任务', value: this.dateText(this.selected!.seen_complete) })
-              this.pair({ label: '下次汇报', value: this.elapsedText(this.properties.reannounce) })
-              this.pair({ label: '连接数 / 上限', value: String(this.properties.nb_connections ?? '—') + ' / ' + (this.properties.nb_connections_limit === -1 ? '不限' : String(this.properties.nb_connections_limit ?? '—')) })
-              this.pair({ label: '浪费数据', value: this.amountText(this.properties.total_wasted) })
-              this.pair({ label: '下载速度', value: bytes(this.selected!.dlspeed) + '/s' })
-              this.pair({ label: '上传速度', value: bytes(this.selected!.upspeed) + '/s' })
-              this.pair({ label: '分享率', value: this.selected!.ratio.toFixed(2) })
-              this.pair({ label: '剩余时间', value: duration(this.selected!.eta) })
-              this.pair({ label: '种子 / 用户', value: `${this.selected!.num_seeds} / ${this.selected!.num_leechs}` })
-              this.pair({ label: '保存路径', value: this.selected!.save_path })
-              this.pair({ label: '标签', value: this.selected!.tags || '无' })
-              this.pair({ label: 'Hash', value: this.selected!.hash })
-              this.pair({ label: '分类', value: this.selected!.category || '未分类' })
-              Button('仅移除任务，保留文件').backgroundColor($r('sys.color.comp_background_tertiary')).fontColor($r('sys.color.font_primary')).width('100%').margin({ top: 24 }).enabled(!this.busy).onClick(() => { this.confirmDelete(this.selected!, false); })
-              Button('删除任务和文件').width('100%').fontColor($r('sys.color.warning')).backgroundColor($r('sys.color.comp_background_tertiary')).margin({ top: 12, bottom: 4 }).enabled(!this.busy)
-                .onClick(() => { this.confirmDelete(this.selected!, true); })
-            }.padding(8).width('100%')
-          }.height('100%').width('100%').expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
-        }.tabBar('概览').expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+            Column({ space: 0 }) {
+              this.notice()
+              this.detailSummary()
+              if (this.detailError) { Text('详情刷新失败：' + this.detailError).fontSize(14).fontColor($r('sys.color.warning')).width('100%').padding(12) }
+              this.sectionTitle('基本信息')
+              Column() {
+                this.pair({ label: '任务大小', value: bytes(this.selected!.size) })
+                this.pair({ label: '添加时间', value: this.dateText(this.properties.addition_date || this.selected!.added_on) })
+                this.pair({ label: '完成时间', value: this.dateText(this.properties.completion_date || this.selected!.completion_on) })
+                this.pair({ label: '剩余时间', value: duration(this.selected!.eta), last: true })
+              }.groupedCard()
+              this.sectionTitle('传输信息')
+              Column() {
+                this.pair({ label: '下载速度', value: bytes(this.selected!.dlspeed) + '/s' })
+                this.pair({ label: '上传速度', value: bytes(this.selected!.upspeed) + '/s' })
+                this.pair({ label: '已下载', value: this.amountText(this.selected!.downloaded) })
+                this.pair({ label: '本次下载', value: this.amountText(this.selected!.downloaded_session) })
+                this.pair({ label: '已上传', value: this.amountText(this.selected!.uploaded) })
+                this.pair({ label: '本次上传', value: this.amountText(this.selected!.uploaded_session) })
+                this.pair({ label: '分享率', value: this.selected!.ratio.toFixed(2) })
+                this.pair({ label: '活动时间', value: this.elapsedText(this.selected!.time_active) })
+                this.pair({ label: '做种时间', value: this.elapsedText(this.selected!.seeding_time) })
+                this.pair({ label: '最近活动', value: this.dateText(this.selected!.last_activity), last: true })
+              }.groupedCard()
+              this.sectionTitle('连接信息')
+              Column() {
+                this.pair({ label: '种子 / 用户', value: `${this.selected!.num_seeds} / ${this.selected!.num_leechs}` })
+                this.pair({ label: '连接数 / 上限', value: String(this.properties.nb_connections ?? '—') + ' / ' + (this.properties.nb_connections_limit === -1 ? '不限' : String(this.properties.nb_connections_limit ?? '—')) })
+                this.pair({ label: '下次汇报', value: this.elapsedText(this.properties.reannounce) })
+                this.pair({ label: '上次见到完整任务', value: this.dateText(this.selected!.seen_complete) })
+                this.pair({ label: '浪费数据', value: this.amountText(this.properties.total_wasted), last: true })
+              }.groupedCard()
+              this.sectionTitle('任务属性')
+              Column() {
+                this.pair({ label: '分类', value: this.selected!.category || '未分类' })
+                this.pair({ label: '标签', value: this.selected!.tags || '无' })
+                this.longValue({ label: '保存路径', value: this.selected!.save_path })
+                this.longValue({ label: 'Hash', value: this.selected!.hash, last: true })
+              }.groupedCard()
+            }.padding({ left: 16, right: 16, top: this.detailContentInset(), bottom: 24 }).width('100%')
+          }.align(Alignment.TopStart).height('100%').width('100%').clipContent(ContentClipMode.SAFE_AREA)
+            .scrollBarMargin({ start: LengthMetrics.vp(this.detailContentInset()), end: LengthMetrics.vp(24) })
+            .onDidScroll(() => { this.updateDetailHeaderBounds(); }).onScrollStop(() => { this.updateDetailHeaderBounds(); })
+            .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+        }.onWillHide(() => { this.rememberDetailScroll(0); })
+          .clip(false).expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
         TabContent() { this.filesPage()
-        }.tabBar('文件').expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+        }.onWillHide(() => { this.rememberDetailScroll(1); })
+          .clip(false).expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
         TabContent() {
-          List({ space: 12, scroller: this.pageScroller('detail-2') }) {
-            ListItem() { Button('重新汇报').enabled(!this.busy).onClick(() => { this.operate('reannounce', [this.selected!.hash]); }) }
-            ForEach(this.trackers, (tracker: Tracker) => {
-              ListItem() {
-                Column({ space: 8 }) {
-                  Text(tracker.url).fontSize(14).width('100%').wordBreak(WordBreak.BREAK_ALL)
-                  Text(`状态：${['禁用', '未联系', '正常', '更新中', '未连接'][tracker.status] || tracker.status} · 用户：${tracker.num_peers}`)
-                    .fontSize(12).fontColor($r('sys.color.font_secondary')).width('100%')
-                  if (tracker.msg) { Text(tracker.msg).fontSize(12).fontColor($r('sys.color.font_secondary')).width('100%') }
-                }.padding(16).width('100%').backgroundColor($r('sys.color.comp_background_primary')).borderRadius(16)
+          List({ scroller: this.pageScroller('detail-2') }) {
+            this.detailListInset()
+            if (this.error) { ListItem() { this.notice() }.padding({ left: 16, right: 16 }) }
+            ListItem() {
+            Row({ space: 8 }) {
+              Text(`${this.trackers.length} 项`).fontSize(12).fontColor($r('sys.color.font_secondary')).layoutWeight(1)
+              Button('重新汇报').fontSize(14).fontWeight(FontWeight.Regular).padding({ left: 8, right: 8 })
+                .backgroundColor(Color.Transparent).fontColor($r('sys.color.brand')).enabled(!this.busy)
+                .onClick(() => { this.operate('reannounce', [this.selected!.hash]); })
+            }.width('100%').height(40).padding({ left: 32, right: 32 })
+            }
+              if (this.trackers.length === 0) {
+                ListItem() { this.empty(this.detailLoading ? '正在加载…' : '暂无 Tracker', '') }
+              } else {
+                ListItemGroup() {
+                  ForEach(this.trackers, (tracker: Tracker) => {
+                    ListItem() {
+                      Column({ space: 4 }) {
+                        Text(tracker.url.startsWith('**') ? tracker.url.replace(/\*/g, '').replace(/\[|\]/g, '').trim() : tracker.url)
+                          .fontSize(14).fontColor($r('sys.color.font_primary')).maxLines(2)
+                          .wordBreak(WordBreak.BREAK_ALL).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%').copyOption(CopyOptions.LocalDevice)
+                        Text(`${['禁用', '未联系', '正常', '更新中', '未连接'][tracker.status] || '未知'} · 用户 ${tracker.num_peers < 0 ? '—' : tracker.num_peers}`)
+                          .fontSize(12).fontColor($r('sys.color.font_secondary')).width('100%')
+                        if (tracker.msg) {
+                          Text(tracker.msg).fontSize(12).fontColor($r('sys.color.font_secondary')).width('100%')
+                            .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).copyOption(CopyOptions.LocalDevice)
+                        }
+                      }.width('100%').padding(16).constraintSize({ minHeight: 64 })
+                    }
+                  }, (tracker: Tracker): string => tracker.url)
+                }.groupedCard().width('calc(100% - 32vp)').margin({ left: 16, right: 16 })
+                  .divider({ strokeWidth: 0.5, color: $r('sys.color.comp_divider'), startMargin: 16, endMargin: 16 })
               }
-            }, (tracker: Tracker) => JSON.stringify(tracker))
-          }.height('100%').padding({ top: 12 })
-        }.tabBar('Tracker').expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+          }.height('100%').width('100%').contentEndOffset(24).clipContent(ContentClipMode.SAFE_AREA)
+            .scrollBarMargin({ start: LengthMetrics.vp(this.detailContentInset()), end: LengthMetrics.vp(24) })
+            .onDidScroll(() => { this.updateDetailHeaderBounds(); }).onScrollStop(() => { this.updateDetailHeaderBounds(); })
+            .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+        }.onWillHide(() => { this.rememberDetailScroll(2); })
+          .clip(false).expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
         TabContent() {
           List({ space: 12, scroller: this.pageScroller('detail-3') }) {
+            this.detailListInset()
+            if (this.error) { ListItem() { this.notice() }.padding({ left: 16, right: 16 }) }
             if (this.peerError) {
-              ListItem() { Text('用户信息刷新失败：' + this.peerError).fontColor($r('sys.color.warning')) }
+              ListItem() { Text('用户信息刷新失败：' + this.peerError).fontSize(14).fontColor($r('sys.color.warning')).padding(16) }
             } else if (this.peers.length === 0) {
-              ListItem() { Text(this.detailLoading ? '正在加载用户…' : '暂无连接用户').fontColor($r('sys.color.font_secondary')) }
+              ListItem() { this.empty(this.detailLoading ? '正在加载用户…' : '暂无连接用户', '') }
             }
             ForEach(this.peers, (peer: TorrentPeer) => {
               ListItem() {
-                Column({ space: 8 }) {
-                  Text((peer.ip.includes(':') ? '[' + peer.ip + ']' : peer.ip) + ':' + peer.port).fontSize(16).width('100%').copyOption(CopyOptions.LocalDevice)
-                  Text((peer.client || '未知客户端') + ' · ' + (peer.connection || '—')).fontSize(12).fontColor($r('sys.color.font_secondary')).width('100%')
+                Column() {
+                  Column({ space: 4 }) {
+                    Text((peer.ip.includes(':') ? '[' + peer.ip + ']' : peer.ip) + ':' + peer.port)
+                      .fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('sys.color.font_primary')).width('100%').copyOption(CopyOptions.LocalDevice)
+                    Text((peer.client || '未知客户端') + ' · ' + (peer.connection || '—')).fontSize(14).fontColor($r('sys.color.font_secondary')).width('100%')
+                  }.padding(16).width('100%')
+                  this.cardDivider()
                   this.pair({ label: '进度', value: percent(peer.progress) + '%' })
                   this.pair({ label: '下载 / 上传', value: bytes(peer.dl_speed) + '/s / ' + bytes(peer.up_speed) + '/s' })
                   this.pair({ label: '已下载 / 已上传', value: bytes(peer.downloaded) + ' / ' + bytes(peer.uploaded) })
-                  this.pair({ label: '连接标志', value: peer.flags || '—' })
-                }.padding(16).width('100%').backgroundColor($r('sys.color.comp_background_primary')).borderRadius(16)
-              }
+                  this.pair({ label: '连接标志', value: peer.flags || '—', last: true })
+                }.groupedCard()
+              }.padding({ left: 16, right: 16 })
             }, (peer: TorrentPeer) => JSON.stringify(peer))
-          }.height('100%').padding({ top: 12, bottom: 16 })
-        }.tabBar('用户').expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
-      }.onChange((index: number) => { this.detailTab = index; }).layoutWeight(1).barMode(BarMode.Fixed).barHeight(48).expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
-    }.width('100%').height('100%').padding({ left: 16, right: 16, top: 16 }).expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+          }.width('100%').height('100%').contentEndOffset(24).clipContent(ContentClipMode.SAFE_AREA)
+            .scrollBarMargin({ start: LengthMetrics.vp(this.detailContentInset()), end: LengthMetrics.vp(24) })
+            .onDidScroll(() => { this.updateDetailHeaderBounds(); }).onScrollStop(() => { this.updateDetailHeaderBounds(); })
+            .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+        }.onWillHide(() => { this.rememberDetailScroll(3); })
+          .clip(false).expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+      }.onAnimationStart((_index: number, targetIndex: number) => { this.activateDetailTab(targetIndex); })
+        .onChange((index: number) => { this.detailContentIndex = index; })
+        .onAnimationEnd((index: number) => {
+          // 手势取消时以实际落定页为准，恢复选中态及导航绑定。
+          if (index !== this.detailTabSelection.index) { this.activateDetailTab(index); }
+          this.restoreDetailScroll(index);
+        })
+        .layoutWeight(1).barHeight(0).clip(false)
+        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+    }.width('100%').height('100%').expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
   }
   @Builder
   private limitForm() {
-    Column({ space: 20 }) {
+    Column({ space: 12 }) {
       this.notice()
-      this.label('全局限速（KiB/s）')
-      TextInput({ text: this.downloadLimit, placeholder: '下载限速' }).type(InputType.Number).onChange((v: string) => { this.downloadLimit = v; })
-      Button('保存下载限速').width('100%').onClick(() => { this.setLimit('Download', this.downloadLimit); })
-      TextInput({ text: this.uploadLimit, placeholder: '上传限速' }).type(InputType.Number).onChange((v: string) => { this.uploadLimit = v; })
-      Button('保存上传限速').width('100%').onClick(() => { this.setLimit('Upload', this.uploadLimit); })
-    }.padding(20).enabled(!this.busy)
+      Column() {
+        this.inputRow({ title: '下载限速', subtitle: 'KiB/s，0 为不限速', value: this.downloadLimit, type: InputType.Number, change: (v: string) => { this.downloadLimit = v; } })
+        this.cardDivider()
+        this.actionRow({ title: '保存下载限速', action: () => { this.setLimit('Download', this.downloadLimit); } })
+      }.groupedCard()
+      Column() {
+        this.inputRow({ title: '上传限速', subtitle: 'KiB/s，0 为不限速', value: this.uploadLimit, type: InputType.Number, change: (v: string) => { this.uploadLimit = v; } })
+        this.cardDivider()
+        this.actionRow({ title: '保存上传限速', action: () => { this.setLimit('Upload', this.uploadLimit); } })
+      }.groupedCard()
+    }.padding({ left: 16, right: 16, top: 12, bottom: 24 }).width('100%').enabled(!this.busy)
   }
   @Builder
   private destination(name: string) {
     HdsNavDestination() {
       Column() {
-      if (name === 'server') { Scroll(this.pageScroller(name)) { this.serverForm() }.align(Alignment.TopStart).height('100%').width('100%') }
-      else if (name === 'servers') { this.serversPage() }
-      else if (name === 'taskRules') { Scroll(this.pageScroller(name)) { this.taskRulesForm() }.height('100%').width('100%') }
-      else if (name === 'bulkActions') {
-        Scroll(this.pageScroller(name)) {
-          Column({ space: 12 }) {
-            this.notice()
-            this.actionRow({ title: '设置分类', action: () => { this.openEdit('category', true); } })
-            this.actionRow({ title: '设置保存路径', action: () => { this.openEdit('location', true); } })
-            this.actionRow({ title: '添加标签', action: () => { this.openEdit('addTags', true); } })
-            this.actionRow({ title: '移除标签', action: () => { this.openEdit('removeTags', true); } })
-            this.actionRow({ title: '队列置顶', action: () => { this.operate('topPrio', this.selection); } })
-            this.actionRow({ title: '队列优先级提高', action: () => { this.operate('increasePrio', this.selection); } })
-            this.actionRow({ title: '队列优先级降低', action: () => { this.operate('decreasePrio', this.selection); } })
-            this.actionRow({ title: '队列置底', action: () => { this.operate('bottomPrio', this.selection); } })
-          }.padding(20).width('100%').enabled(!this.busy && this.selection.length > 0)
-        }.height('100%').width('100%')
-      }
-      else if (name === 'editTorrent') {
-        Scroll(this.pageScroller(name)) {
-          Column({ space: 16 }) {
-            this.notice()
-            this.label(this.pageTitle(name))
-            TextInput({ text: this.editValue }).onChange((v: string) => { this.editValue = v; })
-            Button('保存').width('100%').enabled(!this.busy).onClick(() => { this.applyTorrentEdit(); })
-          }.padding(20).width('100%')
-        }.align(Alignment.TopStart).width('100%').height('100%')
-      } else if (name === 'torrentActions') {
-        Scroll(this.pageScroller(name)) {
-          Column({ space: 12 }) {
-            this.notice()
-            if (this.selected) {
-              this.actionRow({ title: '限速与做种规则', action: () => { this.openTaskRules(); } })
-              this.actionRow({ title: '分享磁力链接', action: () => { this.shareMagnet(); } })
-              this.actionRow({ title: '导出种子文件', action: () => { this.exportSelected(); } })
-              this.actionRow({ title: '强制重新校验', action: () => { if (this.selected) { this.operate('recheck', [this.selected.hash]); } } })
-              this.actionRow({ title: '设置分类', action: () => { this.openEdit('category'); } })
-              this.actionRow({ title: '重命名', action: () => { this.openEdit('rename'); } })
-              this.actionRow({ title: '设置保存路径', action: () => { this.openEdit('location'); } })
-              this.actionRow({ title: '添加标签', action: () => { this.openEdit('addTags'); } })
-              this.actionRow({ title: '移除标签', action: () => { this.openEdit('removeTags'); } })
-              this.actionRow({ title: this.selected.force_start ? '取消强制启动' : '强制启动', action: () => { if (this.selected) { this.toggleForce(this.selected); } } })
-              this.actionRow({ title: this.selected.seq_dl ? '关闭顺序下载' : '启用顺序下载', action: () => { if (this.selected) { this.operate('toggleSequentialDownload', [this.selected.hash]); } } })
-              this.actionRow({ title: this.selected.f_l_piece_prio ? '关闭首尾分块优先' : '启用首尾分块优先', action: () => { if (this.selected) { this.operate('toggleFirstLastPiecePrio', [this.selected.hash]); } } })
-              this.actionRow({ title: '队列优先级提高', action: () => { if (this.selected) { this.operate('increasePrio', [this.selected.hash]); } } })
-              this.actionRow({ title: '队列优先级降低', action: () => { if (this.selected) { this.operate('decreasePrio', [this.selected.hash]); } } })
-            }
-          }.padding(20).width('100%').enabled(!this.busy)
-        }.align(Alignment.TopStart).height('100%').width('100%')
-      }
-      else if (name === 'add') { Scroll(this.pageScroller(name)) { this.addForm() }.align(Alignment.TopStart).height('100%').width('100%') }
-      else if (name === 'detail') {
-        if (this.selected) { this.detailPage() }
-        else { this.empty('任务已不存在', '任务可能已从服务器中移除。') }
-      } else if (name === 'limits') { Scroll(this.pageScroller(name)) { this.limitForm() }.height('100%').width('100%') }
-      else { Scroll(this.pageScroller(name)) { this.preferencesPage(name) }.align(Alignment.TopStart).height('100%').width('100%') }
+        if (name === 'server') { Scroll(this.pageScroller(name)) { this.serverForm() }.secondaryScroll() }
+        else if (name === 'servers') { this.serversPage() }
+        else if (name === 'taskRules') { Scroll(this.pageScroller(name)) { this.taskRulesForm() }.secondaryScroll() }
+        else if (name === 'bulkActions') {
+          Scroll(this.pageScroller(name)) {
+            Column({ space: 12 }) {
+              this.notice()
+              Column() {
+                this.actionRow({ title: '设置分类', opensPage: true, action: () => { this.openEdit('category', true); } })
+                this.cardDivider()
+                this.actionRow({ title: '设置保存路径', opensPage: true, action: () => { this.openEdit('location', true); } })
+                this.cardDivider()
+                this.actionRow({ title: '添加标签', opensPage: true, action: () => { this.openEdit('addTags', true); } })
+                this.cardDivider()
+                this.actionRow({ title: '移除标签', opensPage: true, action: () => { this.openEdit('removeTags', true); } })
+              }.groupedCard()
+              Column() {
+                this.actionRow({ title: '队列置顶', action: () => { this.operate('topPrio', this.selection); } })
+                this.cardDivider()
+                this.actionRow({ title: '队列优先级提高', action: () => { this.operate('increasePrio', this.selection); } })
+                this.cardDivider()
+                this.actionRow({ title: '队列优先级降低', action: () => { this.operate('decreasePrio', this.selection); } })
+                this.cardDivider()
+                this.actionRow({ title: '队列置底', action: () => { this.operate('bottomPrio', this.selection); } })
+              }.groupedCard()
+            }.padding({ left: 16, right: 16, top: 12, bottom: 24 }).width('100%').enabled(!this.busy && this.selection.length > 0)
+          }.secondaryScroll()
+        } else if (name === 'editTorrent') {
+          Scroll(this.pageScroller(name)) {
+            Column({ space: 12 }) {
+              this.notice()
+              Column() {
+                this.inputRow({ title: this.pageTitle(name), value: this.editValue, change: (v: string) => { this.editValue = v; } })
+              }.groupedCard()
+              Button('保存').width('100%').enabled(!this.busy).onClick(() => { this.applyTorrentEdit(); })
+            }.padding({ left: 16, right: 16, top: 12, bottom: 24 }).width('100%')
+          }.secondaryScroll()
+        } else if (name === 'torrentActions') {
+          Scroll(this.pageScroller(name)) {
+            Column({ space: 12 }) {
+              this.notice()
+              if (this.selected) {
+                Column() {
+                  this.actionRow({ title: '限速与做种规则', opensPage: true, action: () => { this.openTaskRules(); } })
+                  this.cardDivider()
+                  this.actionRow({ title: '分享磁力链接', action: () => { this.shareMagnet(); } })
+                  this.cardDivider()
+                  this.actionRow({ title: '导出种子文件', action: () => { this.exportSelected(); } })
+                }.groupedCard()
+                Column() {
+                  this.actionRow({ title: '设置分类', opensPage: true, action: () => { this.openEdit('category'); } })
+                  this.cardDivider()
+                  this.actionRow({ title: '重命名', opensPage: true, action: () => { this.openEdit('rename'); } })
+                  this.cardDivider()
+                  this.actionRow({ title: '设置保存路径', opensPage: true, action: () => { this.openEdit('location'); } })
+                  this.cardDivider()
+                  this.actionRow({ title: '添加标签', opensPage: true, action: () => { this.openEdit('addTags'); } })
+                  this.cardDivider()
+                  this.actionRow({ title: '移除标签', opensPage: true, action: () => { this.openEdit('removeTags'); } })
+                }.groupedCard()
+                Column() {
+                  this.actionRow({ title: '强制重新校验', action: () => { if (this.selected) { this.operate('recheck', [this.selected.hash]); } } })
+                  this.cardDivider()
+                  this.actionRow({ title: this.selected.force_start ? '取消强制启动' : '强制启动', action: () => { if (this.selected) { this.toggleForce(this.selected); } } })
+                  this.cardDivider()
+                  this.actionRow({ title: this.selected.seq_dl ? '关闭顺序下载' : '启用顺序下载', action: () => { if (this.selected) { this.operate('toggleSequentialDownload', [this.selected.hash]); } } })
+                  this.cardDivider()
+                  this.actionRow({ title: this.selected.f_l_piece_prio ? '关闭首尾分块优先' : '启用首尾分块优先', action: () => { if (this.selected) { this.operate('toggleFirstLastPiecePrio', [this.selected.hash]); } } })
+                }.groupedCard()
+                Column() {
+                  this.actionRow({ title: '队列优先级提高', action: () => { if (this.selected) { this.operate('increasePrio', [this.selected.hash]); } } })
+                  this.cardDivider()
+                  this.actionRow({ title: '队列优先级降低', action: () => { if (this.selected) { this.operate('decreasePrio', [this.selected.hash]); } } })
+                }.groupedCard()
+                Column() {
+                  this.actionRow({ title: '仅移除任务，保留文件', action: () => { if (this.selected) { this.confirmDelete(this.selected, false); } } })
+                  this.cardDivider()
+                  this.actionRow({ title: '删除任务和文件', destructive: true, action: () => { if (this.selected) { this.confirmDelete(this.selected, true); } } })
+                }.groupedCard()
+              }
+            }.padding({ left: 16, right: 16, top: 12, bottom: 24 }).width('100%').enabled(!this.busy)
+          }.secondaryScroll()
+        } else if (name === 'add') { Scroll(this.pageScroller(name)) { this.addForm() }.secondaryScroll() }
+        else if (name === 'detail') {
+          if (this.selected) { this.detailPage() }
+          else { this.empty('任务已不存在', '任务可能已从服务器中移除。') }
+        } else if (name === 'limits') { Scroll(this.pageScroller(name)) { this.limitForm() }.secondaryScroll() }
+        else { Scroll(this.pageScroller(name)) { this.preferencesPage(name) }.secondaryScroll() }
       }.width('100%').height('100%')
-    }.titleBar({ avoidLayoutSafeArea: true, enableComponentSafeArea: true, style: this.navigationStyle(), content: { divider: { showType: DividerShowType.OFF }, title: { mainTitle: this.pageTitle(name) }, menu: { value: this.destinationMenus(name) } } })
-      .bindToScrollable(name === 'detail' ? [this.pageScroller('detail-' + this.detailTab)] : [this.pageScroller(name)])
+    }.titleBar({ avoidLayoutSafeArea: true, enableComponentSafeArea: name !== 'detail', style: this.navigationStyle(false, name === 'detail'), content: { divider: { showType: DividerShowType.OFF }, title: { mainTitle: this.pageTitle(name), subTitle: name === 'detail' && this.selected ? this.selected.name : undefined },
+        menu: { value: this.destinationMenus(name) },
+        bottomBuilder: name === 'detail' && this.selected ? { builder: (): void => this.detailTabs(), height: 44 } : undefined } })
+      .titleMode(HdsNavDestinationTitleMode.MINI)
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP])
+      .bindToScrollable(name === 'detail' ? [this.pageScroller('detail-' + this.detailTabSelection.index)] : [this.pageScroller(name)])
+      .dynamicHideTitleBar({ hideTitleArea: name === 'detail', hideBottomBuilder: false, hideStatusBar: false,
+        mode: HideMode.SCROLL_UP_TO, hideOffset: 16, hideRatio: 2 })
       .backgroundColor($r('sys.color.background_secondary')).onBackPressed(() => this.busy)
       .onDisAppear(() => { if (name === 'server') { this.password = ''; } })
   }
